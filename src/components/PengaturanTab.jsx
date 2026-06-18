@@ -61,16 +61,6 @@ export default function PengaturanTab({
             <label className="text-xs font-bold text-gray-500 mb-1 block uppercase">Nama Jemaat</label>
             <input type="text" className="w-full border-2 border-gray-300 p-2.5 rounded-xl focus:border-blue-500 outline-none text-sm font-semibold" value={churchProfile.jemaat || ''} onChange={e => setChurchProfile({...churchProfile, jemaat: e.target.value})} placeholder="Contoh: SYALOM HAUSUSU" />
           </div>
-          <div>
-            <label className="text-xs font-bold text-gray-500 mb-1 block uppercase">Nama Mata Jemaat</label>
-            <input 
-               type="text" 
-               className="w-full border-2 border-gray-300 p-2.5 rounded-xl focus:border-blue-500 outline-none text-sm font-semibold" 
-               value={churchProfile.mataJemaat || ''} 
-               onChange={e => setChurchProfile({...churchProfile, mataJemaat: e.target.value})} 
-               placeholder="Biarkan kosong jika tidak ada" 
-            />
-          </div>
           <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
              <div>
                <label className="text-xs font-bold text-gray-500 mb-1 block uppercase">Nama Ketua Majelis Jemaat</label>
