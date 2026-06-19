@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { RefreshCw, X, Upload, Printer, ArrowLeft, History, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown, Trash2, Edit, Plus, Camera, Eye, LogOut, Gift, MoreVertical } from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { initializeFirestore, collection, onSnapshot, doc, addDoc, updateDoc, deleteDoc, setDoc, getDocs } from 'firebase/firestore';
+import { signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { collection, onSnapshot, doc, addDoc, updateDoc, deleteDoc, setDoc, getDocs } from 'firebase/firestore';
+
+// --- IMPORT FIREBASE DARI FILE TERPISAH ---
+import { db, auth } from './firebase';
 
 // --- IMPORT FILE UTILS & COMPONENTS ---
 import { 
   DEFAULT_PENATUA, DEFAULT_CHURCH_PROFILE, PEKERJAAN_LIST, KATEGORI_PELAYANAN, NAMA_BULAN, 
-  JEMAAT_HEADER_MAP, MAJELIS_HEADER_MAP, FORM_MAJELIS, JEMAAT_FIELDS_PRIBADI, JEMAAT_EDU 
+  JEMAAT_HEADER_MAP, MAJELIS_HEADER_MAP, FORM_MAJELIS, JEMAAT_FIELDS_PRIBADI, JEMAAT_EDU,
+  JEMAAT_HEADERS, MAJELIS_HEADERS 
 } from './utils/constants';
 
 import { 
@@ -23,26 +26,7 @@ import ProfilMajelisTab from './components/ProfilMajelisTab';
 import StatusJemaatTab from './components/StatusJemaatTab';
 import PengaturanTab from './components/PengaturanTab';
 
-// --- FIREBASE INIT ---
 const inCanvas = typeof __firebase_config !== 'undefined' && __firebase_config;
-
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID
-};
-
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-
-// Memaksa Firestore menggunakan Long Polling
-const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true
-});
-
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'sistem-jemaat-app';
 
 const getDBCollection = (colName) => {
@@ -182,19 +166,16 @@ function InfografisTab({ data, filterRayon, type }) {
   );
 }
 
-// KODE BARU: Ganti seluruh komponen BarisTabelJemaat lama di App.jsx dengan ini
 const BarisTabelJemaat = React.memo(({ row, idx, startIndex, tabCols, activeTab, activeSubTabStatus, appUser, isEditable, onAction, jemaatData }) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
   return (
     <React.Fragment>
       <tr className="hover:bg-blue-50/50 transition-colors border-b border-gray-100">
-         {/* 1. Kolom Nomor */}
          <td className="px-4 py-4 text-center font-bold text-gray-400">
            {startIndex + idx + 1}
          </td>
 
-         {/* 2. Kolom Render Data Pokok (Pastikan HANYA ADA SATU tabCols.map) */}
          {tabCols.map((c, j) => (
            <td key={`${row.dbId}-${j}`} className="px-4 py-4">
              {activeTab === 'Data KK' && c.k === 'kepalaKeluarga' ? (
@@ -210,7 +191,6 @@ const BarisTabelJemaat = React.memo(({ row, idx, startIndex, tabCols, activeTab,
            </td>
          ))}
 
-         {/* 3. Kolom Tombol Aksi */}
          {activeTab !== 'Riwayat Sistem' && (
           <td className="px-4 py-3 text-center flex items-center justify-center gap-1.5 sticky right-0 bg-white/95 backdrop-blur shadow-[-4px_0_10px_-5px_rgba(0,0,0,0.05)] h-full">
               {activeTab === 'Status Jemaat' ? (
@@ -252,7 +232,6 @@ const BarisTabelJemaat = React.memo(({ row, idx, startIndex, tabCols, activeTab,
          )}
       </tr>
 
-      {/* Baris Ekspansi Anggota Keluarga Dalam Satu KK (Desktop) - URUT BERDASARKAN NO ANGGOTA */}
       {isExpanded && activeTab === 'Data KK' && jemaatData && (
         <tr className="bg-gray-50 border-b border-gray-200">
           <td colSpan={tabCols.length + 2} className="p-4">
@@ -317,7 +296,6 @@ export default function App() {
 
   const showAlert = (title, message) => setAlertDialog({ isOpen: true, title, message });
 
-  // KODE BARU (Tambahkan state dan ref ini)
   const mobileMenuRef = useRef(null);
 
   useEffect(() => {
@@ -626,12 +604,10 @@ export default function App() {
     const { name, value } = e.target;
     let updates = { [name]: value };
 
-    // 1. GLOBAL: Jika mengubah noRayon, otomatis set nama penatua
     if (name === 'noRayon') {
        updates.penatua = penatuaMap[value] || '';
     }
 
-    // 2. AUTOFILL MAJELIS DARI DATA JEMAAT
     if ((modalMode === 'addMajelis' || modalMode === 'editMajelis') && name === 'namaLengkap') {
        const foundJemaat = jemaatData.find(d => d.namaLengkap === value);
        if (foundJemaat) {
@@ -641,30 +617,26 @@ export default function App() {
           updates.goldar = foundJemaat.goldar || '';
           updates.pekerjaan = foundJemaat.pekerjaan || '';
           updates.noRayon = foundJemaat.noRayon || '';
-          updates.penatua = penatuaMap[foundJemaat.noRayon] || ''; // Otomatis isi penatua jika rayon ikut terisi
+          updates.penatua = penatuaMap[foundJemaat.noRayon] || '';
        }
     }
 
-    // 3. GENERATOR ID KEPALA KELUARGA (KK)
     if (modalMode === 'addKk' || modalMode === 'editKk') {
       const ry = name === 'noRayon' ? value : formData.noRayon, ur = name === 'urutanKk' ? value : formData.urutanKk;
       if(ry && ur) updates.idKk = `KK${pad0(ry)}${pad0(ur)}`;
     }
 
-    // 4. GENERATOR ID ANGGOTA JEMAAT
     if (modalMode === 'addJemaat' || modalMode === 'addAnggota' || modalMode === 'editJemaat') {
       const ry = name === 'noRayon' ? value : formData.noRayon, ur = name === 'urutanKk' ? value : formData.urutanKk, ag = name === 'noAnggota' ? value : formData.noAnggota;
       if(ry && ur && ag) updates.idJemaat = `AG${pad0(ry)}${pad0(ur)}${pad0(ag)}`;
     }
 
-    // 5. RESET FIELD BERSYARAT (Kondisional)
     if (name === 'baptis' && value === 'Belum') updates = { ...updates, gerejaBaptis: '', tanggalBaptis: '', pendetaBaptis: '' };
     if (name === 'sidi' && value === 'Belum') updates = { ...updates, gerejaSidi: '', tanggalSidi: '', pendetaSidi: '' };
     if (name === 'nikah' && value === 'Belum') updates = { ...updates, gerejaNikah: '', tanggalNikah: '', pendetaNikah: '', jenisNikah: [] };
     if (name === 'asuransi' && value === 'Tidak') updates = { ...updates, jaminan: '' };
     if (name === 'disabilitas' && value === 'Tidak') updates = { ...updates, jenisDisabilitas: '' };
     
-    // Simpan semua pembaruan ke dalam state
     setFormData(prev => ({ ...prev, ...updates }));
   };
 
@@ -858,7 +830,6 @@ export default function App() {
 
       {modalMode && (
         <div className="fixed inset-0 z-100 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto print:hidden">
-          {/* Modal Container: Dioptimasi untuk HP dengan w-full max-h-[90vh] */}
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl mt-20 mb-10 flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-200">
             <div className="p-5 border-b flex justify-between items-center bg-gray-50 rounded-t-2xl shrink-0">
               <h3 className="text-xl font-black text-gray-800">{modalMode === 'warisanKk' ? 'Pewarisan Kepala Keluarga' : modalMode === 'viewKk' ? 'Detail Data Kepala Keluarga' : modalMode === 'viewMajelis' ? 'Detail Profil Majelis' : modalMode === 'viewJemaat' ? 'Detail Lengkap Jemaat' : modalMode.includes('Kk') ? 'Formulir Kepala Keluarga' : modalMode.includes('Majelis') ? 'Formulir Data Majelis' : 'Formulir Data Jemaat'}</h3>
@@ -914,7 +885,7 @@ export default function App() {
                         {modalMode === 'editJemaat' ? (
                            <div className="md:col-span-1">
                               <label className="text-xs font-semibold text-gray-600 mb-1 block">ID KK (Pindah KK)</label>
-                              <select value={formData.idKk || ''} onChange={(e) => { const kkTujuan = jemaatData.find(k => k.idKk === e.target.value && k.statusKeluarga === 'Kepala Keluarga' && k.statusKeanggotaan !== 'Meninggal' && k.statusKeanggotaan !== 'Pindah'); if (kkTujuan) { const newIdJemaat = formData.noAnggota ? `AG${pad0(kkTujuan.noRayon)}${pad0(kkTujuan.urutanKk)}${pad0(formData.noAnggota)}` : formData.idJemaat; setFormData(p => ({ ...p, idKk: kkTujuan.idKk, kepalaKeluarga: kkTujuan.kepalaKeluarga, noRayon: kkTujuan.noRayon, urutanKk: kkTujuan.urutanKk, penatua: kkTujuan.penatua, alamat: kkTujuan.alamat, idJemaat: newIdJemaat })); } }} className="w-full border p-2 rounded bg-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"><option value={formData.idKk}>{formData.idKk} (KK Saat Ini)</option>{jemaatData.filter(d => d?.statusKeluarga === 'Kepala Keluarga' && d?.idKk !== formData.idKk && d?.statusKeanggotaan !== 'Meninggal' && d?.statusKeanggotaan !== 'Pindah').map(k => (<option key={`opt-${k.idKk}`} value={k.idKk}>{k.idKk} - {k.kepalaKeluarga}</option>))}</select>
+                              <select value={formData.idKk || ''} onChange={(e) => { const kkTujuan = jemaatData.find(k => k.idKk === e.target.value && k.statusKeluarga === 'Kepala Keluarga' && k.statusKeanggotaan !== 'Meninggal' && k.statusKeanggotaan !== 'Pindah'); if (kkTujuan) { const newIdJemaat = formData.noAnggota ? `AG${pad0(kkTujuan.noRayon)}${pad0(kkTujuan.urutanKk)}${pad0(formData.noAnggota)}` : formData.idJemaat; setFormData(p => ({ ...p, idKk: kkTujuan.idKk, kepalaKeluarga: kkTujuan.kepalaKeluarga, noRayon: kkTujuan.noRayon, urutanKk: kkTujuan.urutanKk, penatua: kkTujuan.penatua, alamat: kkTujuan.alamat, idJemaat: newIdJemaat })); } }} className="w-full border p-2 rounded bg-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"><option value={formData.idKk}>{formData.idKk} (KK Saat Ini)</option>{jemaatData.filter(d => d?.statusKeluarga === 'Kepala Keluarga' && d?.idKk !== formData.idKk && d?.statusKeanggotaan !== 'Meninggal' && d?.statusKeanggotaan !== 'Pindah').map(k => (<option key={k.dbId} value={k.idKk}>{k.idKk} - {k.kepalaKeluarga}</option>))}</select>
                            </div>
                         ) : ( <FormInput label="ID KK" value={formData.idKk} dis /> )}
                         <FormInput label="Kepala Keluarga" value={formData.kepalaKeluarga} dis /> <FormInput label="Rayon" value={formData.noRayon} dis />
@@ -950,7 +921,6 @@ export default function App() {
                       </div>
                       <div className="flex-1 w-full"><label className="block text-sm font-black text-purple-900 mb-2">Upload Foto Profil Majelis</label><input type="file" accept="image/*" onChange={handleImageUpload} className="w-full text-sm file:mr-4 file:py-2.5 file:px-5 file:rounded-xl file:border-0 file:text-sm file:font-bold file:bg-purple-600 file:text-white hover:file:bg-purple-700 cursor-pointer border-2 border-purple-200 rounded-xl bg-white p-1"/></div>
                     </div>
-                    {/* Daftar Pencarian Pintar (Datalist) */}
                     <datalist id="jemaat-names">
                        {jemaatData.filter(d => d.statusKeanggotaan !== 'Meninggal' && d.statusKeanggotaan !== 'Pindah').map(d => (
                          <option key={d.dbId} value={d.namaLengkap} />

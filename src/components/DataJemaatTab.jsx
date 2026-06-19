@@ -1,6 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Users, Plus, ChevronDown, Download, FileUp, Trash2, Search, ChevronLeft, ChevronRight, Eye, Edit } from 'lucide-react';
 import { calculateAge, toDisplayDate } from '../utils/helpers';
+import Papa from 'papaparse';
+import { handleImportCSV } from '../utils/importHelper'; // Pastikan path ini benar!
+import { db } from '../firebase'; // Aktifkan jika Anda ingin langsung menulis ke Firestore dari sini
+import { collection, doc, writeBatch } from 'firebase/firestore'; 
+
 
 export default function DataJemaatTab({
   appUser, setFormData, setModalMode, penatuaMap,
@@ -15,26 +20,237 @@ export default function DataJemaatTab({
   SortableHeader, BarisTabelJemaat, handleRowAction,
   
   // Fungsi Khusus Opsi Admin
-  handleExportCSV, handleExportSinode, handleCleanAll, fileInputRef,
+  handleExportCSV, handleExportSinode, handleCleanAll, 
   // Infografis
   InfografisTab, jemaatData
 }) {
    const [showMenuOps, setShowMenuOps] = useState(false);
-   // State untuk mengatur kartu mana yang sedang diklik/dibuka di versi Mobile
    const [expandedId, setExpandedId] = useState(null);
-    // Fungsi untuk menghasilkan kelas warna border yang konsisten berdasarkan String (idKk)
-    const getColorClassById = (str) => {
+   
+   const getColorClassById = (str) => {
       if (!str) return 'border-gray-200';
       const colors = ['border-blue-400', 'border-emerald-400', 'border-purple-400', 'border-amber-400', 'border-rose-400', 'border-indigo-400', 'border-teal-400', 'border-orange-400', 'border-pink-400', 'border-cyan-400'];
       let hash = 0;
       for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
       const index = Math.abs(hash) % colors.length;
       return colors[index];
+   };
+   
+// ========================================================
+  // SCRIPT IMPORT JSON - AUTO-GENERATE KELUARGA & ID
+  // ========================================================
+  const handleImportJSON = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const rawData = JSON.parse(event.target.result);
+        const rawValidData = [];
+
+        // 1. Kumpulkan semua baris yang tidak kosong
+        rawData.forEach(row => {
+           if (row['Nama Lengkap']) rawValidData.push(row);
+        });
+
+        if (rawValidData.length === 0) {
+           alert("Data JSON kosong atau format tidak sesuai."); return;
+        }
+
+        // 2. PROSES AUTO-GROUPING KELUARGA
+        const rayonTracker = {}; // Melacak urutan KK terakhir per rayon
+        const familyGroups = {}; // Menyimpan data per kelompok KK
+
+        rawValidData.forEach(row => {
+            const rayonClean = String(row['Rayon'] || '').replace(/\D/g, '') || '0';
+            const kepalaKeluarga = String(row['Nama Kepala Keluarga'] || '').trim().toUpperCase();
+            
+            // Kunci pengelompokan: Rayon + Nama KK (Contoh: "1_BUDI SANTOSO")
+            const groupKey = `${rayonClean}_${kepalaKeluarga}`;
+
+            if (!familyGroups[groupKey]) {
+                if (!rayonTracker[rayonClean]) rayonTracker[rayonClean] = 1;
+                familyGroups[groupKey] = {
+                    urutanKk: rayonTracker[rayonClean]++, // Berikan urutan lalu tambahkan 1 untuk keluarga berikutnya
+                    members: []
+                };
+            }
+            familyGroups[groupKey].members.push(row);
+        });
+
+        // 3. MERAKIT DATA FINAL DENGAN ID OTOMATIS
+        const validDataToImport = [];
+        const pad0 = (num) => String(num).padStart(2, '0');
+        const getMonthNumber = (monthName) => {
+          if (!monthName) return '01';
+          const NAMA_BULAN = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+          const index = NAMA_BULAN.findIndex(m => m.toLowerCase() === monthName.toLowerCase());
+          return index !== -1 ? String(index + 1).padStart(2, '0') : '01';
+        };
+
+        Object.values(familyGroups).forEach(group => {
+            const urutanKkFinal = group.urutanKk;
+            
+            // Urutkan cerdas agar Kepala Keluarga selalu No 1 dan Istri No 2
+            group.members.sort((a, b) => {
+                const statusA = String(a['Status dalam Keluarga']||'').toLowerCase();
+                const statusB = String(b['Status dalam Keluarga']||'').toLowerCase();
+                if (statusA.includes('kepala')) return -1;
+                if (statusB.includes('kepala')) return 1;
+                if (statusA.includes('istri')) return -1;
+                if (statusB.includes('istri')) return 1;
+                return 0; // Sisanya (Anak, Famili) biarkan sesuai urutan baris di Excel
+            });
+
+            // Mulai mapping data per anggota
+            group.members.forEach((row, index) => {
+                const noAnggotaFinal = index + 1; // 1, 2, 3, dst.
+                const rayonClean = String(row['Rayon'] || '').replace(/\D/g, '') || '0';
+                
+                // GENERATE ID DISINI
+                const idKkGenerated = `KK${pad0(rayonClean)}${pad0(urutanKkFinal)}`;
+                const idJemaatGenerated = `AG${pad0(rayonClean)}${pad0(urutanKkFinal)}${pad0(noAnggotaFinal)}`;
+
+                const tgl = String(row['Tanggal lahir'] || '1').padStart(2, '0');
+                const bln = getMonthNumber(row['Bulan Lahir']);
+                const thn = row['Tahun lahir'] || '1900';
+                
+                let jenisNikah = row['Status nikah'] || '';
+                if (row['Status nikah/Nikah Gereja/Masehi'] === 'Ya' || row['Status nikah/Nikah Gereja/Masehi'] === 1) jenisNikah = 'Nikah Gereja/Masehi';
+                else if (row['Status nikah/Nikah Adat'] === 'Ya' || row['Status nikah/Nikah Adat'] === 1) jenisNikah = 'Nikah Adat';
+                else if (row['Status nikah/Nikah Catatan Sipil/BS'] === 'Ya' || row['Status nikah/Nikah Catatan Sipil/BS'] === 1) jenisNikah = 'Nikah Catatan Sipil/BS';
+
+                validDataToImport.push({
+                    idKk: idKkGenerated,
+                    noAnggota: noAnggotaFinal.toString(),
+                    urutanKk: urutanKkFinal.toString(),
+                    idJemaat: idJemaatGenerated,
+                    noRayon: rayonClean,
+                    alamat: String(row['Alamat'] || '').trim(),
+                    noTelp: String(row['No.Telp'] || '').trim(),
+                    kepalaKeluarga: String(row['Nama Kepala Keluarga'] || '').trim(),
+                    namaLengkap: String(row['Nama Lengkap'] || '').trim(),
+                    nik: String(row['NIK'] || '').trim(),
+                    jk: String(row['Jenis Kelamin'] || '').trim() === 'L' ? 'Laki-laki' : (String(row['Jenis Kelamin'] || '').trim() === 'P' ? 'Perempuan' : String(row['Jenis Kelamin'] || '').trim()),
+                    tempatLahir: String(row['Tempat Lahir'] || '').trim(),
+                    tanggalLahir: `${thn}-${bln}-${tgl}`,
+                    goldar: String(row['Golongan Darah'] || 'Tidak Tahu').trim(),
+                    statusKeluarga: String(row['Status dalam Keluarga'] || '').trim(),
+                    baptis: String(row['Baptis'] || '').trim(),
+                    sidi: String(row['Sidi'] || '').trim(),
+                    nikah: String(row['Nikah'] || '').trim(),
+                    jenisNikah: jenisNikah,
+                    sukuAyah: String(row['Suku Ayah'] || '').trim(),
+                    sukuIbu: String(row['Suku Ibu'] || '').trim(),
+                    pendidikan: String(row['Pendidikan'] || '').trim(),
+                    pekerjaan: String(row['Pekerjaan utama'] || '').trim(),
+                    penghasilan: String(row['Penghasilan'] || '').trim(),
+                    asuransi: String(row['Apakah mempunyai jaminan/asuransi kesehatan?'] || '').trim(),
+                    jaminan: String(row['Jaminan Kesehatan'] || row['Jika asuransi lainnya, sebutkan!'] || '').trim(),
+                    jandaDuda: String(row['Janda / Duda'] || '').trim(),
+                    yatimPiatu: String(row['Yatim / Piatu'] || '').trim(),
+                    disabilitas: String(row['Disabilitas'] || '').trim(),
+                    jenisDisabilitas: String(row['Jika ya, sebutkan ragam disabilitas'] || '').trim(),
+                    
+                    statusKeanggotaan: 'Aktif',
+                    statusHidup: 'Hidup',
+                    createdAt: Date.now()
+                });
+            });
+        });
+
+        console.log("Data Siap Masuk Firebase:", validDataToImport);
+
+        // 4. BATCH WRITE KE FIREBASE
+        const chunkSize = 400;
+        for (let i = 0; i < validDataToImport.length; i += chunkSize) {
+           const chunk = validDataToImport.slice(i, i + chunkSize);
+           const batch = writeBatch(db);
+           chunk.forEach((dataRow) => {
+               const docRef = doc(collection(db, "jemaat"));
+               batch.set(docRef, dataRow);
+           });
+           await batch.commit();
+        }
+
+        alert(`MIGRASI OTOMATIS SUKSES! \n${validDataToImport.length} data jemaat telah dirakit beserta ID KK dan ID Jemaat-nya secara otomatis.`);
+        e.target.value = null;
+
+      } catch (error) {
+         console.error("Gagal import:", error);
+         alert("Terjadi kesalahan saat memproses data.");
+      }
     };
+    reader.readAsText(file);
+  };
+
+   // ==========================================
+   // FUNGSI BARU: PENANGANAN IMPORT CSV
+   // ==========================================
+   const handleLocalCSVUpload = (event) => {
+     const file = event.target.files[0];
+     if (!file) return;
+
+     // Reset nilai input agar bisa mengupload file yang sama jika gagal
+     event.target.value = null;
+
+     Papa.parse(file, {
+       header: true,
+       skipEmptyLines: true,
+       complete: async (results) => {
+         // jemaatData (dari props) berisi seluruh data existing untuk validasi NIK/Nama ganda
+         const { validDataToImport, errors } = handleImportCSV(results.data, jemaatData);
+
+         if (errors.length > 0) {
+           alert(`Ditemukan ${errors.length} data duplikat/bermasalah (Berdasarkan NIK & Nama):\n\n` + errors.slice(0, 5).join('\n') + (errors.length > 5 ? '\n...dan lainnya' : ''));
+         }
+
+         if (validDataToImport.length > 0) {
+           console.log("Data siap masuk Firebase:", validDataToImport);
+           
+           try {
+             // Kita pecah array menjadi beberapa bongkahan (chunks) maksimal 400 data per batch 
+             // untuk menghindari limitasi 500 operasi per batch dari Firestore.
+             const chunkSize = 400; 
+             
+             for (let i = 0; i < validDataToImport.length; i += chunkSize) {
+               const chunk = validDataToImport.slice(i, i + chunkSize);
+               const batch = writeBatch(db);
+
+               chunk.forEach((dataRow) => {
+                 // Membuat referensi dokumen baru di koleksi "jemaat" dengan ID yang di-generate otomatis
+                 const docRef = doc(collection(db, "jemaat")); 
+                 batch.set(docRef, dataRow);
+               });
+
+               // Mengeksekusi/mengirim batch ke server Firebase
+               await batch.commit();
+             }
+
+             alert(`Sukses! ${validDataToImport.length} data jemaat berhasil disimpan ke database.`);
+             
+             // Opsional: Jika Anda punya fungsi untuk memuat ulang data dari Firebase, panggil di sini
+             // contoh: fetchDataJemaat(); atau setRefreshTrigger(prev => !prev);
+
+           } catch (error) {
+             console.error("Gagal simpan ke database:", error);
+             alert("Terjadi kesalahan sistem saat menyimpan ke database Firebase. Silakan periksa koneksi atau console log.");
+           }
+
+         } else {
+           alert("Tidak ada data baru yang bisa diimpor. Semua baris mungkin kosong atau duplikat.");
+         }
+       },
+       error: (error) => {
+         console.error("Gagal membaca file CSV:", error);
+         alert("Gagal membaca file CSV. Pastikan format sudah benar.");
+       }
+     });
+   };
 
    return (
     <div className="animate-in fade-in duration-300">
-       {/* SUB MENU PENGALIH TABEL & GRAFIK */}
        <div className="mb-4 print:hidden">
            <label className="text-[10px] font-black text-gray-400 mb-1 block uppercase tracking-wider">Sub Menu Data Jemaat</label>
            <div className="relative inline-block w-full sm:w-auto">
@@ -47,7 +263,6 @@ export default function DataJemaatTab({
         </div>
 
         <div className="bg-white rounded-3xl shadow-sm border border-gray-200 overflow-hidden print:border-none print:shadow-none">
-            {/* TOP ACTION BAR */}
             <div className="p-6 border-b border-gray-100 flex flex-col xl:flex-row xl:items-center justify-between gap-4 print:hidden">
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="text-xl font-black text-gray-800 flex items-center gap-2 mr-4">
@@ -69,14 +284,31 @@ export default function DataJemaatTab({
                            <>
                               <div className="fixed inset-0 z-40" onClick={() => setShowMenuOps(false)}></div>
                               <div className="absolute left-0 mt-2 w-52 bg-white border border-gray-100 rounded-2xl shadow-xl z-50 overflow-hidden flex flex-col animate-in fade-in slide-in-from-top-2 duration-200">
-                                 <button onClick={() => { setShowMenuOps(false); handleExportCSV(); }} className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-left text-sm font-bold text-gray-700"><Download className="w-4 h-4 text-emerald-600"/> Download Excel Bawaan</button>
-                                 <button onClick={handleExportSinode} className="... whitespace-nowrap ...">
-                                 Laporan ke Sinode
-                                 </button>
-                                 <button onClick={() => { setShowMenuOps(false); fileInputRef.current.click(); }} className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-left text-sm font-bold text-gray-700"><FileUp className="w-4 h-4 text-amber-500"/> Import CSV</button>
-                                 <div className="h-px bg-gray-100 w-full"></div>
-                                 <button onClick={() => { setShowMenuOps(false); handleCleanAll('jemaat'); }} className="flex items-center gap-3 px-4 py-3 hover:bg-red-50 text-left text-sm font-bold text-red-600"><Trash2 className="w-4 h-4"/> Kosongkan Data</button>
-                              </div>
+   <button onClick={() => { setShowMenuOps(false); handleExportCSV(); }} className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-left text-sm font-bold text-gray-700">
+     <Download className="w-4 h-4 text-emerald-600"/> Download Excel Bawaan
+   </button>
+   
+   <button onClick={handleExportSinode} className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-left text-sm font-bold text-gray-700 whitespace-nowrap">
+     Laporan ke Sinode
+   </button>
+   
+   {/* TOMBOL ONE-TIME IMPORT JSON YANG BENAR (Tanpa butuh Ref) */}
+   <label className="flex items-center gap-3 px-4 py-3 hover:bg-emerald-50 text-left text-sm font-bold text-emerald-700 cursor-pointer border-t border-gray-100 m-0">
+      <FileUp className="w-4 h-4 text-emerald-500"/> Eksekusi Import JSON
+      <input 
+         type="file" 
+         accept=".json" 
+         onChange={(e) => { setShowMenuOps(false); handleImportJSON(e); }} 
+         className="hidden" 
+      />
+   </label>
+
+   <div className="h-px bg-gray-100 w-full"></div>
+   
+   <button onClick={() => { setShowMenuOps(false); handleCleanAll('jemaat'); }} className="flex items-center gap-3 px-4 py-3 hover:bg-red-50 text-left text-sm font-bold text-red-600">
+     <Trash2 className="w-4 h-4"/> Kosongkan Data
+   </button>
+</div>
                            </> 
                        )}
                     </div>
@@ -106,7 +338,6 @@ export default function DataJemaatTab({
               </div>
             </div>
 
-            {/* AREA RENDER UTAMA */}
             <div className="p-0">
                 <div className="hidden print:block mb-4 border-b-2 border-black pb-4">
                    <h1 className="text-2xl font-bold uppercase text-center">Data {subTabJemaat}</h1>
@@ -120,7 +351,6 @@ export default function DataJemaatTab({
                    </div>
                 ) : (
                    <>
-                      {/* DESKTOP VIEW: TABEL KLASIK */}
                       <div className="hidden md:block overflow-x-auto min-h-[50vh]">
                         <table className="w-full text-left border-collapse min-w-max">
                           <thead>
@@ -149,14 +379,12 @@ export default function DataJemaatTab({
                         </table>
                       </div>
 
-                      {/* MOBILE VIEW: TAMPILAN KARTU (CARDS) */}
                       <div className="md:hidden flex flex-col p-4 gap-3 bg-gray-50 min-h-[50vh]">
                          {currentData.length === 0 ? (
                             <div className="py-12 text-center text-gray-400 font-bold"><Users className="w-12 h-12 mx-auto mb-3 opacity-50"/> Tidak ada data ditemukan.</div>
                          ) : (
                             currentData.map((row, idx) => (
                                <div key={row.dbId||idx} className={`bg-white border border-gray-200 border-l-8 ${getColorClassById(row.idKk)} rounded-2xl shadow-sm overflow-hidden transition-all duration-200`}>
-                                  {/* Kartu Utama (Bisa Diklik) */}
                                   <div onClick={() => setExpandedId(prev => prev === row.dbId ? null : row.dbId)} className="p-4 flex items-center gap-4 cursor-pointer active:bg-blue-50">
                                      <div className="flex flex-col items-center justify-center min-w-50px">
                                         <span className="text-3xl font-black text-red-600 leading-none">{calculateAge(row.tanggalLahir)}</span>
@@ -167,7 +395,6 @@ export default function DataJemaatTab({
                                      
                                      <div className="flex-1">
                                         <h4 className="font-bold text-blue-900 text-sm">{row.namaLengkap}</h4>
-                                        {/* KODE BARU */}
                                         <p className="text-xs font-semibold text-gray-600 mt-1">
                                           Nama KK: <span className="font-bold text-gray-800">{row.kepalaKeluarga || '-'}</span>
                                         </p>
@@ -176,7 +403,6 @@ export default function DataJemaatTab({
                                      <ChevronDown className={`w-5 h-5 text-gray-400 transition-transform duration-300 ${expandedId === row.dbId ? 'rotate-180 text-blue-500' : ''}`} />
                                   </div>
 
-                                  {/* Aksi Tambahan (Muncul Saat Kartu Diperluas) */}
                                   {expandedId === row.dbId && (
                                      <div className="bg-blue-50/50 border-t border-gray-100 p-4 flex flex-wrap gap-2 animate-in slide-in-from-top-2 duration-200">
                                         <button onClick={() => handleRowAction('view', row)} className="flex-1 py-2.5 bg-blue-100 text-blue-700 hover:bg-blue-600 hover:text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-colors"><Eye className="w-4 h-4"/> Detail</button>
@@ -199,7 +425,6 @@ export default function DataJemaatTab({
                 )}
             </div>
 
-            {/* PAGINASI */}
             {subTabJemaat !== 'Infografis' && (
               <div className="bg-gray-50 p-5 border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-4 print:hidden rounded-b-3xl">
                  <p className="text-sm text-gray-500 font-bold">Menampilkan total: <span className="font-black text-blue-800 text-base">{totalItems}</span> Data</p>
